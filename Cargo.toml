@@ -3,6 +3,20 @@ name = "spotify-server"
 version = "0.1.0"
 edition = "2021"
 
+# Use Windows subsystem by default (no console)
+[[bin]]
+name = "spotify-server"
+path = "src/main.rs"
+
+# Profile for release builds - no console window
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Profile for dev builds - with console
+[profile.dev]
+# Console will be available in dev builds
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -17,6 +31,13 @@ tracing-subscriber = "0.3"
 tray-icon = "0.17"
 image = "0.25"
 anyhow = "1.0"
+rust-embed = "8.0"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging", 
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem"
+] }

@@ -1,3 +1,6 @@
+// Use Windows subsystem to prevent console window by default
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::env;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -18,10 +21,16 @@ use std::thread;
 use std::sync::mpsc;
 use image::GenericImageView;
 use anyhow;
+use rust_embed::RustEmbed;
+
+#[derive(RustEmbed)]
+#[folder = "assets/"]
+struct Assets;
 
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG,
+use windows::Win32::{
+    UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, MessageBoxW, MB_OK, MB_ICONERROR, ShowWindow, SW_HIDE, SW_SHOW},
+    System::Console::{AllocConsole, GetConsoleWindow, SetConsoleTitleW},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,144 +94,392 @@ pub struct ClientInfo {
 
 type PlayerState = Arc<RwLock<PlayerData>>;
 type ClientRegistry = Arc<RwLock<HashMap<String, ClientType>>>;
+
+// Function to show error dialog on Windows
+#[cfg(target_os = "windows")]
+fn show_error_dialog(message: &str) {
+    use windows::core::PCWSTR;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    
+    let wide_title: Vec<u16> = OsStr::new("Spotify Server Error")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let wide_message: Vec<u16> = OsStr::new(message)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+      unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(wide_message.as_ptr()),
+            PCWSTR(wide_title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_error_dialog(message: &str) {
+    eprintln!("Error: {}", message);
+}
+
+// Function to hide console window on Windows
+#[cfg(target_os = "windows")]
+fn hide_console() {
+    unsafe {
+        let console_window = GetConsoleWindow();
+        if !console_window.is_invalid() {
+            let _ = ShowWindow(console_window, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console() {
+    // No-op on non-Windows platforms
+}
+
+// Function to show console window on Windows
+#[cfg(target_os = "windows")]
+fn show_console() {
+    unsafe {
+        let console_window = GetConsoleWindow();
+        if console_window.is_invalid() {
+            // Allocate a new console if one doesn't exist (Windows subsystem mode)
+            if AllocConsole().is_ok() {
+                // Set console title
+                use windows::core::PCWSTR;
+                use std::ffi::OsStr;
+                use std::os::windows::ffi::OsStrExt;
+                
+                let title: Vec<u16> = OsStr::new("Spotify Server - Debug Console")
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let _ = SetConsoleTitleW(PCWSTR(title.as_ptr()));
+                
+                // Redirect stdout, stderr, and stdin to the new console
+                redirect_console_streams();
+            }
+        } else {
+            // Console already exists, just show it
+            let _ = ShowWindow(console_window, SW_SHOW);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn redirect_console_streams() {
+    use std::ffi::CString;
+    
+    unsafe {
+        // Redirect stdout to console
+        if let Ok(conout) = CString::new("CONOUT$") {
+            if let Ok(mode) = CString::new("w") {
+                libc::freopen(conout.as_ptr(), mode.as_ptr(), libc_stdhandle::stdout());
+            }
+        }
+        
+        // Redirect stderr to console
+        if let Ok(conout) = CString::new("CONOUT$") {
+            if let Ok(mode) = CString::new("w") {
+                libc::freopen(conout.as_ptr(), mode.as_ptr(), libc_stdhandle::stderr());
+            }
+        }
+        
+        // Redirect stdin to console
+        if let Ok(conin) = CString::new("CONIN$") {
+            if let Ok(mode) = CString::new("r") {
+                libc::freopen(conin.as_ptr(), mode.as_ptr(), libc_stdhandle::stdin());
+            }
+        }
+    }
+}
+
+// Helper module to get standard handles as FILE pointers
+#[cfg(target_os = "windows")]
+mod libc_stdhandle {
+    use libc::FILE;
+    
+    extern "C" {
+        #[link_name = "__acrt_iob_func"]
+        fn acrt_iob_func(fd: u32) -> *mut FILE;
+    }
+    
+    pub unsafe fn stdin() -> *mut FILE {
+        acrt_iob_func(0)
+    }
+    
+    pub unsafe fn stdout() -> *mut FILE {
+        acrt_iob_func(1)
+    }
+    
+    pub unsafe fn stderr() -> *mut FILE {
+        acrt_iob_func(2)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_console() {
+    // No-op on non-Windows platforms
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Channel to signal shutdown
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let dev_mode = args.iter().any(|arg| arg == "-dev" || arg == "--dev");
+    
+    // Handle console visibility based on dev mode
+    if dev_mode {
+        show_console();
+        println!("[Dev Mode] Console enabled");
+    } else {
+        hide_console();
+    }
+    
+    // Set up panic handler for error dialogs in non-dev mode
+    if !dev_mode {
+        std::panic::set_hook(Box::new(|panic_info| {
+            let message = if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                format!("Application crashed: {}", s)
+            } else if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                format!("Application crashed: {}", s)
+            } else {
+                "Application crashed with an unknown error".to_string()
+            };
+            
+            let location = if let Some(location) = panic_info.location() {
+                format!("\n\nLocation: {}:{}:{}", location.file(), location.line(), location.column())
+            } else {
+                String::new()
+            };
+            
+            let full_message = format!("{}{}\n\nThe application will now exit.", message, location);
+            show_error_dialog(&full_message);
+        }));
+    }
+    
+    // Wrap the main logic in a Result to catch and handle errors gracefully
+    if let Err(e) = run_application(dev_mode).await {
+        let error_message = format!("Failed to start Spotify Server: {}", e);
+        if dev_mode {
+            eprintln!("{}", error_message);
+        } else {
+            show_error_dialog(&error_message);
+        }
+        std::process::exit(1);
+    }
+    
+    Ok(())
+}
+
+async fn run_application(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing - only show logs in dev mode or if explicitly enabled
+    if dev_mode {
+        tracing_subscriber::fmt::init();
+        info!("🔧 Running in development mode");
+    } else {
+        // In production mode, only log errors and above
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .init();
+    }    // Channel to signal shutdown
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     // --- System Tray Setup ---
     let _tray_thread = thread::spawn(move || {
-        // Try multiple paths for the icon
+        // --- Tray icon loading logic (fixed for embedded and alert) ---
         let possible_paths = vec![
-            // First try relative to current working directory (for development)
             std::env::current_dir().unwrap().join("assets").join("icon.png"),
-            // Then try relative to executable (for release builds)
             std::env::current_exe().unwrap().parent().unwrap().join("assets").join("icon.png"),
-            // Also try .ico format
             std::env::current_dir().unwrap().join("assets").join("icon.ico"),
             std::env::current_exe().unwrap().parent().unwrap().join("assets").join("icon.ico"),
         ];
-        
-        let mut icon_path = None;
-        for path in possible_paths {
+        let mut icon_bytes: Option<(Vec<u8>, String)> = None;
+        for path in &possible_paths {
             if path.exists() {
-                icon_path = Some(path);
-                break;
-            }
-        }
-        
-        let icon_path = match icon_path {
-            Some(path) => path,
-            None => {
-                eprintln!("[Tray] No icon file found in expected locations");
-                return;
-            }
-        };
-        
-        println!("[Tray] Attempting to load icon from: {:?}", icon_path);
-        let icon = match image::open(&icon_path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (width, height) = img.dimensions();
-                println!("[Tray] Icon loaded successfully: {}x{}", width, height);
-                match tray_icon::Icon::from_rgba(rgba.into_raw(), width, height) {
-                    Ok(icon) => Some(icon),
-                    Err(e) => {
-                        eprintln!("[Tray] Failed to create tray icon: {}", e);
-                        None
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        icon_bytes = Some((bytes, ext.to_string()));
+                        break;
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("[Tray] Failed to load icon file: {}", e);
-                None
-            },
-        };
-        
-        if let Some(icon) = icon {
-            println!("[Tray] Creating tray icon...");
-            
-            // Create menu with explicit ID
-            let menu = Menu::new();
-            let exit_item = MenuItem::with_id("exit", "Exit", true, None);
-            
-            if let Err(e) = menu.append(&exit_item) {
-                eprintln!("[Tray] Failed to append exit item: {}", e);
-                return;
+        }
+        // If not found on disk, try embedded assets
+        if icon_bytes.is_none() {
+            if let Some(embed) = Assets::get("icon.png") {
+                icon_bytes = Some((embed.data.to_vec(), "png".to_string()));
+            } else if let Some(embed) = Assets::get("icon.ico") {
+                icon_bytes = Some((embed.data.to_vec(), "ico".to_string()));
             }
-            
-            // Create tray icon
-            let _tray_icon = match TrayIconBuilder::new()
-                .with_icon(icon)
-                .with_tooltip("Spotify Server")
-                .with_menu(Box::new(menu))
-                .build()
-            {
-                Ok(tray_icon) => {
-                    println!("[Tray] System tray icon created successfully!");
-                    tray_icon
+        }
+        if icon_bytes.is_none() {
+            if dev_mode {
+                eprintln!("[Tray] No icon file found in expected locations or embedded assets");
+            } else {
+                show_error_dialog("No tray icon file found in expected locations or embedded in the executable.");
+            }
+            return;
+        }
+        let (icon_data, icon_type) = icon_bytes.unwrap();
+        // Try to decode the icon
+        let icon = match icon_type.as_str() {
+            "png" => match image::load_from_memory(&icon_data) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (width, height) = img.dimensions();
+                    match tray_icon::Icon::from_rgba(rgba.into_raw(), width, height) {
+                        Ok(icon) => Some(icon),
+                        Err(e) => {
+                            if dev_mode {
+                                eprintln!("[Tray] Failed to create tray icon: {}", e);
+                            } else {
+                                show_error_dialog(&format!("Failed to create tray icon: {}", e));
+                            }
+                            None
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("[Tray] Failed to create tray icon: {}", e);
-                    return;
+                    if dev_mode {
+                        eprintln!("[Tray] Failed to load icon image: {}", e);
+                    } else {
+                        show_error_dialog(&format!("Failed to load icon image: {}", e));
+                    }
+                    None
                 }
-            };
-            
-            // Start menu event handler in async context
-            std::thread::spawn(move || {
-                // Use tokio's blocking scheduler for this thread
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    loop {
-                        if let Ok(event) = MenuEvent::receiver().try_recv() {
-                            let event_id = event.id.0.as_str();
-                            match event_id {
-                                "exit" => {
+            },
+            "ico" => match image::load_from_memory_with_format(&icon_data, image::ImageFormat::Ico) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (width, height) = img.dimensions();
+                    match tray_icon::Icon::from_rgba(rgba.into_raw(), width, height) {
+                        Ok(icon) => Some(icon),
+                        Err(e) => {
+                            if dev_mode {
+                                eprintln!("[Tray] Failed to create tray icon: {}", e);
+                            } else {
+                                show_error_dialog(&format!("Failed to create tray icon: {}", e));
+                            }
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    if dev_mode {
+                        eprintln!("[Tray] Failed to load icon image: {}", e);
+                    } else {
+                        show_error_dialog(&format!("Failed to load icon image: {}", e));
+                    }
+                    None
+                }
+            },
+            _ => {
+                if dev_mode {
+                    eprintln!("[Tray] Unsupported icon type: {}", icon_type);
+                } else {
+                    show_error_dialog(&format!("Unsupported icon type: {}", icon_type));
+                }
+                None
+            }
+        };
+        if icon.is_none() {
+            return;
+        }        let icon = icon.unwrap();
+        
+        if dev_mode {
+            println!("[Tray] Creating tray icon...");
+        }
+        
+        // Create menu with explicit ID
+        let menu = Menu::new();
+        let exit_item = MenuItem::with_id("exit", "Exit", true, None);
+          if let Err(e) = menu.append(&exit_item) {
+            if dev_mode {
+                eprintln!("[Tray] Failed to append exit item: {}", e);
+            } else {
+                show_error_dialog(&format!("Failed to create tray menu: {}", e));
+            }
+            return;
+        }
+        
+        // Create tray icon
+        let _tray_icon = match TrayIconBuilder::new()
+            .with_icon(icon)
+            .with_tooltip("Spotify Server")
+            .with_menu(Box::new(menu))
+            .build()        {
+            Ok(tray_icon) => {
+                if dev_mode {
+                    println!("[Tray] System tray icon created successfully!");
+                }
+                tray_icon
+            }
+            Err(e) => {
+                if dev_mode {
+                    eprintln!("[Tray] Failed to create tray icon: {}", e);
+                } else {
+                    show_error_dialog(&format!("Failed to create tray icon: {}", e));
+                }
+                return;
+            }
+        };
+        
+        // Start menu event handler in async context
+        std::thread::spawn(move || {
+            // Use tokio's blocking scheduler for this thread
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                loop {
+                    if let Ok(event) = MenuEvent::receiver().try_recv() {
+                        let event_id = event.id.0.as_str();                        match event_id {
+                            "exit" => {
+                                if dev_mode {
                                     println!("[Tray] Exit menu item clicked, shutting down...");
-                                    // Send shutdown signal
-                                    let _ = shutdown_tx.send(());
-                                    break;
                                 }
-                                _ => {
+                                // Send shutdown signal
+                                let _ = shutdown_tx.send(());
+                                break;
+                            }
+                            _ => {
+                                if dev_mode {
                                     println!("[Tray] Unknown menu event: {}", event_id);
                                 }
                             }
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
-                });
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
             });
-            
-            // Run Windows message loop on this thread
-            #[cfg(target_os = "windows")]
-            {
+        });
+          // Run Windows message loop on this thread
+        #[cfg(target_os = "windows")]
+        {
+            if dev_mode {
                 println!("[Tray] Starting Windows message loop...");
-                unsafe {
-                    let mut msg = MSG::default();
-                    loop {
-                        let result = GetMessageW(&mut msg, None, 0, 0);
-                        if result.0 <= 0 {
-                            break;
-                        }
-                        DispatchMessageW(&msg);
-                    }
-                }
             }
-            
-            #[cfg(not(target_os = "windows"))]
-            {
-                // For non-Windows platforms, just keep the thread alive
+            unsafe {
+                let mut msg = MSG::default();
                 loop {
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    let result = GetMessageW(&mut msg, None, 0, 0);
+                    if result.0 <= 0 {
+                        break;
+                    }
+                    DispatchMessageW(&msg);
                 }
             }
-        } else {
-            eprintln!("[Tray] No tray icon will be shown (icon missing or invalid)");
+        }
+          #[cfg(not(target_os = "windows"))]
+        {
+            // For non-Windows platforms, just keep the thread alive
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
         }
     });
-
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
 
     // Shared state
     let player_state = PlayerState::default();
