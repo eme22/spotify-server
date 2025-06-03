@@ -2,3 +2,6 @@
 *.vscode
 *.iml
 .idea
+Cargo.lock
+.git
+/.github
