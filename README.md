@@ -10,14 +10,23 @@ A high-performance Rust implementation of a Socket.IO server for controlling Spo
 - **Live Player Data**: Track information broadcasting with metadata
 - **Cross-platform**: Works on Windows, macOS, and Linux
 
+> [!NOTE]
+> All advanced features and latest real-time control options require the [Spotify Playback API](https://github.com/eme22/spotify-playback-api) plugin.
+
 ## Quick Start
 
 1. **Install the Spicetify extension** (required):
+   
+   > [!IMPORTANT]
+   > To unlock all the **new and advanced features** of this server, you must use the Spotify Playback API plugin.
+   
    ```bash
-   # Download playbackapick.js from https://github.com/CrazyKitty357/spotify-playback-api-ck
-   spicetify config extensions playbackapick.js
+   # Download playbackapi.js from https://github.com/eme22/spotify-playback-api
+   spicetify config extensions playbackapi.js
    spicetify apply
    ```
+   
+   *(Alternatively, for basic features, you can use the legacy `playbackapick.js` extension from [here](https://github.com/CrazyKitty357/spotify-playback-api-ck)).*
 
 2. **Build and run the server**:
    ```bash
@@ -65,12 +74,15 @@ Environment variables:
 - `player_data`: Broadcasts current track information to all clients
 - `command`: Spotify client sends track updates
 
-## Related Projects
+## Related Projects & Plugins
 
 This server is part of a complete Spotify control ecosystem:
 
-### 🎵 [Spicetify Extension (Required)](https://github.com/CrazyKitty357/spotify-playback-api-ck)
-The essential extension that connects Spotify to this server. Download `playbackapick.js` and install via Spicetify.
+### 🔌 [Spotify Playback API (Required for New Features)](https://github.com/eme22/spotify-playback-api)
+The primary playback plugin that connects Spotify to this server. This plugin is **required** to support the newest and advanced features of the server. Download `playbackapi.js` and install it via Spicetify.
+
+### 🎵 [Alternative Spicetify Extension](https://github.com/CrazyKitty357/spotify-playback-api-ck)
+A legacy/alternative extension for basic connection and playback control.
 
 ### 🐍 [Python HTTP Alternative](https://github.com/CrazyKitty357/spotify-playback-http/tree/less-compat-version)
 A Python Flask server providing HTTP/REST API instead of Socket.IO for the same functionality.
